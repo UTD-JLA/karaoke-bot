@@ -1,6 +1,7 @@
 {
     "token": "token",
     "guild_id": "000000",
+    "channel_id": "0000",
     "operator_roles": ["0000"],
     "max_queued_per_user": "1"
 }
