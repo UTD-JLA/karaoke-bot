@@ -131,10 +131,10 @@ async def playbackLoop():
 
 
 # command to initialize a queue
-@tree.command(name="set-queue", description="Creates a new empty karaoke queue or switches to queue of specified name")
+@tree.command(name="initialize", description="Creates a new empty karaoke queue or switches to queue of specified name")
 async def initialize(interaction: discord.Interaction, queue_name: str):
-    global current_queue
     """Creates or switches to specific karaoke queue by name"""
+    global current_queue
     if not is_karaoke_operator(interaction.user):
         await interaction.response.send_message(f'Cannot set queue, permission denied')
         return
@@ -217,6 +217,87 @@ async def addsong(interaction: discord.Interaction, song_url: str, lyrics_url: O
         cursor.close()
     await interaction.followup.send(f"Added song {video_metadata['title']}\n{song_url}")
 
+# command to manually set the current position
+@tree.command(name="set-position", description="Stops the current playback and sets the current position to a specified value")
+async def setposition(interaction: discord.Interaction, new_position: int):
+    """Stops the current playback and sets the current position to a specified value"""
+    global current_queue
+    if not is_karaoke_operator(interaction.user):
+        await interaction.response.send_message(f'Cannot set position, permission denied')
+        return
+    _, max_position = get_current_and_max_position(current_queue)
+    if new_position > max_position:
+        await interaction.response.send_message(f'Cannot set position to {new_position}, it exceeds max position of {max_position}')
+        return
+    # terminate the current playback loop and restart it at new position
+    playbackLoop.cancel()
+    with conn:
+        cursor = conn.cursor()
+        updatequery = "UPDATE queues SET currentpos = ? WHERE name = ?;"
+        cursor.execute(updatequery, (new_position, current_queue))
+        cursor.close()
+    while playbackLoop.is_running():
+        await asyncio.sleep(1)
+    playbackLoop.start()
+    await interaction.response.send_message(f'Set position to {new_position}')
 
+
+@tree.command(name="list-songs", description="Lists currently queued songs")
+async def listsongs(interaction: discord.Interaction, listall: Optional[bool]):
+    """Lists queued songs"""
+    curpos, _ = get_current_and_max_position(current_queue)
+    with conn:
+        cursor = conn.cursor()
+        if listall:
+            query = "SELECT * FROM songs WHERE is_revoked = FALSE ORDER BY position;"
+            cursor.execute(query)
+        else:
+            query = "SELECT * FROM songs WHERE position >= ? AND is_revoked = FALSE ORDER BY position;"
+            cursor.execute(query, (curpos,))
+        rows = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        # Create a list of dictionaries
+        result_list = []
+        for row in rows:
+            song_dict = {column_names[i]: row[i] for i in range(len(column_names))}
+            result_list.append(song_dict)
+        cursor.close()
+    
+    output = "Currently queued songs:\n"
+    if not result_list: #empty
+        output+="There are no songs currently queued"
+    for song in result_list:
+        member = await interaction.guild.fetch_member(int(song['discord_user_id']))
+        output+=f"{song['position']:0>2} : {member.nick if member.nick is not None else member.name} : {song['title']}"
+        if song["collaborators"]:
+            output+=f" with {song['collaborators']}"
+        output+="\n"
+    await interaction.response.send_message(output, silent=True)
+
+# command to mark a song as revoked
+@tree.command(name="remove-song", description="Removes song at specified index")
+async def removesong(interaction: discord.Interaction, position: int):
+    """Removes song at specified index"""
+    global current_queue
+
+    # ensure user is either admin or was the creator of the entry
+    if not is_karaoke_operator(interaction.user):
+        query = "SELECT discord_user_id FROM songs WHERE position = ?;"
+        with conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (position,))
+            userofsong = cursor.fetchone()[0]
+            cursor.close()
+        if not interaction.user.id == userofsong:
+            await interaction.response.send_message(f'You only have permission to remove your own songs')
+            return
+
+    with conn:
+        cursor = conn.cursor()
+        updatequery = "UPDATE songs SET is_revoked = TRUE WHERE position = ?;"
+        cursor.execute(updatequery, (position,))
+        cursor.close()
+    await interaction.response.send_message(f'Removed song at {position}')
+    
 
 client.run(config["token"])
