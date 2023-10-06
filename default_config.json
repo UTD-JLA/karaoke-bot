@@ -1,0 +1,6 @@
+{
+    "token": "token",
+    "guild_id": "000000",
+    "operator_roles": ["0000"],
+    "max_queued_per_user": "1"
+}
