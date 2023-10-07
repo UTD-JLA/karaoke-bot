@@ -44,7 +44,7 @@ def get_song_metadata(song_url: str) -> Optional[dict]:
         video_metadata = json.loads(dl_output)
         if video_metadata["duration"] == "NA":
             #aise Exception("Could not fetch video duration from yt-dlp")
-            return None
+            raise Exception("yt-dlp failure")
         return video_metadata
     except Exception as e: #try with ffprobe (if file directly)
         try:
@@ -197,7 +197,7 @@ async def addsong(interaction: discord.Interaction, song_url: str, lyrics_url: O
     
         # First, ensure the user is allowed to queue
         if not is_karaoke_operator(interaction.user):
-            cursor.execute("SELECT COUNT(*) FROM songs WHERE is_revoked = FALSE AND completed_time IS NULL;")
+            cursor.execute("SELECT COUNT(*) FROM songs WHERE is_revoked = FALSE AND completed_time IS NULL and discord_user_id = ?;", (interaction.user.id,))
             
             currently_queued_by_user = cursor.fetchone()[0]
             if currently_queued_by_user >= int(config["max_queued_per_user"]):
@@ -312,10 +312,10 @@ async def listsongs(interaction: discord.Interaction, listall: Optional[bool]):
         output+="There are no songs currently queued"
     for song in result_list:
         member = await interaction.guild.fetch_member(int(song['discord_user_id']))
-        output+=f"{song['position']:0>2} : {member.nick if member.nick is not None else member.name} : {song['title']}"
+        output+=f"{song['position']:0>2} : {member.nick if member.nick is not None else member.name} : "
         if song["collaborators"]:
-            output+=f" with {song['collaborators']}"
-        output+="\n"
+            output+=f"{song['collaborators']} : "
+        output+=f"{song['title']}\n"
     await interaction.response.send_message(output, silent=True)
 
 # command to mark a song as revoked
