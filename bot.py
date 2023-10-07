@@ -1,34 +1,35 @@
 import json
+import datetime
 import asyncio
 from pathlib import Path
 from typing import TypedDict, Optional
 import subprocess
+
 import discord
 from discord import app_commands
 from discord.ext import tasks
 import db
-import sqlite3
-import datetime
 
 class Config(TypedDict):
     guild_id: str
     token: int
     queue_manager_roles: list
 
+
 def get_config() -> Config:
     """
     Reads configuration from config file
     """
-    DEFAULT_CONFIG = Path(__file__).parent.joinpath("default_config.json")
-    USER_CONFIG = Path(__file__).parent.joinpath("config.json")
-    with open(DEFAULT_CONFIG) as f:
-        config = json.load(f)
-    if USER_CONFIG.is_file():
-        with open(USER_CONFIG) as f:
+    default_config_path = Path(__file__).parent.joinpath("default_config.json")
+    user_config_path = Path(__file__).parent.joinpath("config.json")
+    with open(default_config_path) as f:
+        global_config = json.load(f)
+    if user_config_path.is_file():
+        with open(user_config_path) as f:
             user_config = json.load(f)
-        for k,v in user_config.items():
-            config[k] = v
-    return config
+        for k, v in user_config.items():
+            global_config[k] = v
+    return global_config
 
 
 # read the config file and initialize the db
@@ -36,35 +37,80 @@ config = get_config()
 conn = db.set_up_database()
 current_queue = ""
 
+
 def get_song_metadata(song_url: str) -> Optional[dict]:
     """
     This obtains a dictionary containing, currently, the title and duration of a queued song.
     It first tries yt-dlp, and upon failure to find the title and duration, tries ffmpeg (for direct links to media files)
     """
     try:
-        downloader = subprocess.run(["yt-dlp", "--no-playlist", "--print", '{"title":%(title)j,"duration":"%(duration)j"}', song_url], text=True, capture_output=True, encoding="utf8", check=True)
+        downloader = subprocess.run(
+            [
+                "yt-dlp",
+                "--no-playlist",
+                "--print",
+                '{"title":%(title)j,"duration":"%(duration)j"}',
+                song_url,
+            ],
+            text=True,
+            capture_output=True,
+            encoding="utf8",
+            check=True,
+        )
         dl_output = downloader.stdout
         video_metadata = json.loads(dl_output)
         if video_metadata["duration"] == "NA" or video_metadata["title"] == "NA":
-            #aise Exception("Could not fetch video duration from yt-dlp")
+            # aise Exception("Could not fetch video duration from yt-dlp")
             raise Exception("yt-dlp failure", downloader.stderr)
         print(video_metadata)
-        video_metadata['duration'] = int(float(video_metadata['duration'])) # some sties like niconico return decimal durations
+        video_metadata["duration"] = int(
+            float(video_metadata["duration"])
+        )  # some sties like niconico return decimal durations
         return video_metadata
-    except Exception as ytdlp_failure: #try with ffprobe (if file directly)
+    except Exception as ytdlp_failure:  # try with ffprobe (if file directly)
         try:
-            ffprober = subprocess.run(["ffprobe", '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', song_url], text=True, capture_output=True, encoding="utf8", check=True)
+            ffprober = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                    song_url,
+                ],
+                text=True,
+                capture_output=True,
+                encoding="utf8",
+                check=True,
+            )
             ffprobe_output = json.loads(str(ffprober.stdout))
             print(ffprober.stdout)
             # sometimes, the tags are part of the stream block and sometimes part of the format block. Here we check both and merge the result
-            tags = {tag.lower(): v for d in [ffprobe_output.get('format', {}).get('tags', {}), ffprobe_output.get('streams', [{}])[0].get('tags', {})] for tag, v in d.items()}
-            video_metadata = {"title": tags["title"], "duration": int(float(ffprobe_output.get('format', {})["duration"]))}
+            tags = {
+                tag.lower(): v
+                for d in [
+                    ffprobe_output.get("format", {}).get("tags", {}),
+                    ffprobe_output.get("streams", [{}])[0].get("tags", {}),
+                ]
+                for tag, v in d.items()
+            }
+            video_metadata = {
+                "title": tags["title"],
+                "duration": int(float(ffprobe_output.get("format", {})["duration"])),
+            }
             return video_metadata
 
         except Exception as ffprobe_failure:
-            #await interaction.followup.send("There was an error parsing the specified URL. Please double-check it")
-            print(f"Error fetching metadata of song {song_url}:", ytdlp_failure, ffprobe_failure)
+            # await interaction.followup.send("There was an error parsing the specified URL. Please double-check it")
+            print(
+                f"Error fetching metadata of song {song_url}:",
+                ytdlp_failure,
+                ffprobe_failure,
+            )
             return None
+
 
 def get_current_and_max_position(queuename: str) -> (int, int):
     """Finds the current and max position of the active queue"""
@@ -74,18 +120,26 @@ def get_current_and_max_position(queuename: str) -> (int, int):
         cursor.execute(query, (queuename,))
         return cursor.fetchone()
 
+
 def increment_cur_pos(queuename: str):
     """Increment the current position of the active queue"""
-    query= "UPDATE queues SET currentpos = ? WHERE name = ?;"
+    query = "UPDATE queues SET currentpos = ? WHERE name = ?;"
     curpos, _ = get_current_and_max_position(queuename)
     with conn:
         cursor = conn.cursor()
-        cursor.execute(query, (curpos+1, current_queue))
+        cursor.execute(query, (curpos + 1, current_queue))
         cursor.close()
+
 
 def is_karaoke_operator(user):
     """Determine if a user is authorized to manage the bot"""
-    return not set([int(id) for id in config["operator_roles"]]).intersection(set([role.id for role in user.roles])) == set()
+    return (
+        not set([int(id) for id in config["operator_roles"]]).intersection(
+            set([role.id for role in user.roles])
+        )
+        == set()
+    )
+
 
 # setting up the bot
 class aclient(discord.Client):
@@ -101,10 +155,12 @@ class aclient(discord.Client):
             await tree.sync(guild=discord.Object(id=config["guild_id"]))
             self.synced = True
 
+
 client = aclient()
 tree = app_commands.CommandTree(client)
 
-@tasks.loop(seconds = 5)
+
+@tasks.loop(seconds=5)
 async def playback_loop():
     """The main loop to check for a new song and play it"""
     # There is no active queue
@@ -114,8 +170,8 @@ async def playback_loop():
     # There are no more songs in the queue
     curr_index, max_index = get_current_and_max_position(current_queue)
     if max_index <= curr_index:
-        return 
-    
+        return
+
     # Fetch the current song and play it
     with conn:
         cursor = conn.cursor()
@@ -128,20 +184,28 @@ async def playback_loop():
             current_song = {column_names[i]: row[i] for i in range(len(column_names))}
         else:
             print("Some kind of error ocurred fetching the next song")
-        
+
         # If the song was revoked, skip it
         if current_song["is_revoked"]:
             increment_cur_pos(current_queue)
             return
         notification_message = f"<@{str(current_song['discord_user_id'])}>, it is now your turn to sing {current_song['title']}"
         if current_song["collaborators"]:
-            notification_message+=f" with {current_song['collaborators']}"
+            notification_message += f" with {current_song['collaborators']}"
         if current_song["lyrics_url"]:
-            notification_message+=f"\nLyrics: {current_song['lyrics_url']}"
+            notification_message += f"\nLyrics: {current_song['lyrics_url']}"
         await client.botchannel.send(notification_message)
         # Now try to play it
         try:
-            process = subprocess.Popen(["mpv","-fs","-pause","--ytdl-raw-options=format-sort=res:1080",current_song["url"]])
+            process = subprocess.Popen(
+                [
+                    "mpv",
+                    "-fs",
+                    "-pause",
+                    "--ytdl-raw-options=format-sort=res:1080",
+                    current_song["url"],
+                ]
+            )
             while process.poll() is None:
                 await asyncio.sleep(1)
         except Exception as mpv_error:
@@ -149,40 +213,45 @@ async def playback_loop():
         finished_at = datetime.datetime.now()
 
         # Now update the db such that the song is completed
-        query= "UPDATE songs SET completed_time = ? WHERE position = ?;"
+        query = "UPDATE songs SET completed_time = ? WHERE position = ?;"
         with conn:
             cursor = conn.cursor()
             cursor.execute(query, (finished_at, current_song["position"]))
             cursor.close()
         increment_cur_pos(current_queue)
 
-    
-
 
 # command to initialize a queue
-@tree.command(name="initialize", description="Creates a new empty karaoke queue or switches to queue of specified name")
+@tree.command(
+    name="initialize",
+    description="Creates a new empty karaoke queue or switches to queue of specified name",
+)
 async def initialize(interaction: discord.Interaction, queue_name: str):
     """Creates or switches to specific karaoke queue by name"""
     global current_queue
     if not is_karaoke_operator(interaction.user):
-        await interaction.response.send_message('Cannot set queue, permission denied')
+        await interaction.response.send_message("Cannot set queue, permission denied")
         return
     writequery = "INSERT INTO queues (name, currentpos, maxpos, discord_guild_id, time_created) VALUES (?,?,?,?,?)"
     created_at = datetime.datetime.now()
-        # check if queue exists
+    # check if queue exists
     result = get_current_and_max_position(queue_name)
     if result:
         current_position, max_position = result
-        await interaction.response.send_message(f"Fetched queue {queue_name} with current current_position {current_position} and max current_position {max_position}")
+        await interaction.response.send_message(
+            f"Fetched queue {queue_name} with current current_position {current_position} and max current_position {max_position}"
+        )
     else:
         with conn:
             cursor = conn.cursor()
-            cursor.execute(writequery, (queue_name, 0, 0, config["guild_id"], created_at))
-            await interaction.response.send_message(f'New queue {queue_name} created!')
+            cursor.execute(
+                writequery, (queue_name, 0, 0, config["guild_id"], created_at)
+            )
+            await interaction.response.send_message(f"New queue {queue_name} created!")
     current_queue = queue_name
     if not playback_loop.is_running():
         playback_loop.start()
-    
+
 
 @tree.command(name="listqueues", description="Lists existing queues")
 async def listqueues(interaction: discord.Interaction):
@@ -193,55 +262,99 @@ async def listqueues(interaction: discord.Interaction):
         cursor.execute(query)
         rows = cursor.fetchall()
         cursor.close()
-    await interaction.response.send_message("Current queues: \n" + '\n'.join(["{0}, created on {1}".format(row[0], row[1]) for row in rows]))
+    await interaction.response.send_message(
+        "Current queues: \n"
+        + "\n".join(["{0}, created on {1}".format(row[0], row[1]) for row in rows])
+    )
+
 
 @tree.command(name="addsong", description="Add a song to the queue")
-async def addsong(interaction: discord.Interaction, song_url: str, lyrics_url: Optional[str], collaborators: Optional[str], notes: Optional[str]):
+async def addsong(
+    interaction: discord.Interaction,
+    song_url: str,
+    lyrics_url: Optional[str],
+    collaborators: Optional[str],
+    notes: Optional[str],
+):
     """Adds a song to the queue"""
-    global current_queue
     if current_queue == "":
         await interaction.response.send_message("No queues are currently active.")
         return
     with conn:
         cursor = conn.cursor()
-    
+
         # First, ensure the user is allowed to queue
         if not is_karaoke_operator(interaction.user):
-            cursor.execute("SELECT COUNT(*) FROM songs WHERE is_revoked = FALSE AND completed_time IS NULL and discord_user_id = ?;", (interaction.user.id,))
-            
+            cursor.execute(
+                "SELECT COUNT(*) FROM songs WHERE is_revoked = FALSE AND completed_time IS NULL and discord_user_id = ?;",
+                (interaction.user.id,),
+            )
+
             currently_queued_by_user = cursor.fetchone()[0]
             if currently_queued_by_user >= int(config["max_queued_per_user"]):
-                await interaction.response.send_message(f"You currently already have {currently_queued_by_user} songs queued. Either swap an existing one or wait until you go next before queuing again")
+                await interaction.response.send_message(
+                    f"You currently already have {currently_queued_by_user} songs queued. Either swap an existing one or wait until you go next before queuing again"
+                )
                 cursor.close()
                 return
         # Try getting metadata with yt-dlp (for video sites)
-        await interaction.response.defer() # sometimes takes more than 3 seconds
+        await interaction.response.defer()  # sometimes takes more than 3 seconds
         video_metadata = get_song_metadata(song_url)
         if not video_metadata:
-            await interaction.followup.send("There was an error fetching the song's metadata. Check the URL.")
+            await interaction.followup.send(
+                "There was an error fetching the song's metadata. Check the URL."
+            )
             return
 
         query = "INSERT INTO songs (url, title, duration, added_time, lyrics_url, notes, position, collaborators, completed_time, is_revoked, discord_user_id, discord_guild_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
         created_at = datetime.datetime.now()
         try:
             _, max_position = get_current_and_max_position(current_queue)
-            cursor.execute(query, (song_url, video_metadata['title'], int(video_metadata['duration']), created_at, lyrics_url, notes, max_position, collaborators, None, False, interaction.user.id, config["guild_id"]))
+            cursor.execute(
+                query,
+                (
+                    song_url,
+                    video_metadata["title"],
+                    int(video_metadata["duration"]),
+                    created_at,
+                    lyrics_url,
+                    notes,
+                    max_position,
+                    collaborators,
+                    None,
+                    False,
+                    interaction.user.id,
+                    config["guild_id"],
+                ),
+            )
 
         except Exception as database_error:
-            await interaction.followup.send("There was an error adding the song to the database. Is it a duplicate?")
+            await interaction.followup.send(
+                "There was an error adding the song to the database. Is it a duplicate?"
+            )
             print(f"Error adding song {song_url} to database", database_error)
             return
-        max_position+=1
-        # save the new position 
+        max_position += 1
+        # save the new position
         updatequery = "UPDATE queues SET maxpos = ? WHERE name = ?;"
         cursor.execute(updatequery, (max_position, current_queue))
         cursor.close()
     await interaction.followup.send(f"Added song {video_metadata['title']}\n{song_url}")
 
-@tree.command(name="swapsong", description="Swap your song with a specified index with a new one while keeping place in the queue")
-async def swapsong(interaction: discord.Interaction, position: int, song_url: str, lyrics_url: Optional[str], collaborators: Optional[str], notes: Optional[str]):
+
+@tree.command(
+    name="swapsong",
+    description="Swap your song with a specified index with a new one while keeping place in the queue",
+)
+async def swapsong(
+    interaction: discord.Interaction,
+    position: int,
+    song_url: str,
+    lyrics_url: Optional[str],
+    collaborators: Optional[str],
+    notes: Optional[str],
+):
     """Swap your song with a specified index with a new one while keeping place in the queue"""
-    global current_queue
     if current_queue == "":
         await interaction.response.send_message("No queues are currently active.")
         return
@@ -252,38 +365,67 @@ async def swapsong(interaction: discord.Interaction, position: int, song_url: st
         cursor.execute(query, (position,))
         userofsong = cursor.fetchone()[0]
         if not interaction.user.id == userofsong:
-            await interaction.response.send_message('You only have permission to remove your own songs')
+            await interaction.response.send_message(
+                "You only have permission to remove your own songs"
+            )
             return
         # Try getting metadata with yt-dlp (for video sites)
-        await interaction.response.defer() # sometimes takes more than 3 seconds
+        await interaction.response.defer()  # sometimes takes more than 3 seconds
         video_metadata = get_song_metadata(song_url)
         if not video_metadata:
-            await interaction.followup.send("There was an error fetching the song's metadata. Check the URL.")
+            await interaction.followup.send(
+                "There was an error fetching the song's metadata. Check the URL."
+            )
             return
         query = "UPDATE songs SET url = ?, title = ?, duration = ?, lyrics_url = ?, notes = ?, collaborators = ?, is_revoked = ?, discord_user_id = ?, discord_guild_id = ? WHERE position = ?;"
         try:
-            cursor.execute(query, (song_url, video_metadata['title'], int(video_metadata['duration']), lyrics_url, notes, collaborators, False, interaction.user.id, config["guild_id"], position))
+            cursor.execute(
+                query,
+                (
+                    song_url,
+                    video_metadata["title"],
+                    int(video_metadata["duration"]),
+                    lyrics_url,
+                    notes,
+                    collaborators,
+                    False,
+                    interaction.user.id,
+                    config["guild_id"],
+                    position,
+                ),
+            )
         except Exception as database_error:
-            await interaction.followup.send("There was an error adding the song to the database. Is it a duplicate?")
+            await interaction.followup.send(
+                "There was an error adding the song to the database. Is it a duplicate?"
+            )
             print(f"Error adding song {song_url} to database", database_error)
             return
 
-    await interaction.followup.send(f"Swapped position {position} with {video_metadata['title']}\n{song_url}")
+    await interaction.followup.send(
+        f"Swapped position {position} with {video_metadata['title']}\n{song_url}"
+    )
+
 
 # command to manually set the current position
-@tree.command(name="setposition", description="Stops the current playback and sets the current position to a specified value")
+@tree.command(
+    name="setposition",
+    description="Stops the current playback and sets the current position to a specified value",
+)
 async def setposition(interaction: discord.Interaction, new_position: int):
     """Stops the current playback and sets the current position to a specified value"""
-    global current_queue
     if current_queue == "":
         await interaction.response.send_message("No queues are currently active.")
         return
     if not is_karaoke_operator(interaction.user):
-        await interaction.response.send_message('Cannot set position, permission denied')
+        await interaction.response.send_message(
+            "Cannot set position, permission denied"
+        )
         return
     _, max_position = get_current_and_max_position(current_queue)
     if new_position > max_position:
-        await interaction.response.send_message(f'Cannot set position to {new_position}, it exceeds max position of {max_position}')
+        await interaction.response.send_message(
+            f"Cannot set position to {new_position}, it exceeds max position of {max_position}"
+        )
         return
     # terminate the current playback loop and restart it at new position
     playback_loop.cancel()
@@ -295,7 +437,7 @@ async def setposition(interaction: discord.Interaction, new_position: int):
     while playback_loop.is_running():
         await asyncio.sleep(1)
     playback_loop.start()
-    await interaction.response.send_message(f'Set position to {new_position}')
+    await interaction.response.send_message(f"Set position to {new_position}")
 
 
 @tree.command(name="listsongs", description="Lists currently queued songs")
@@ -321,23 +463,23 @@ async def listsongs(interaction: discord.Interaction, include_old: Optional[bool
             song_dict = {column_names[i]: row[i] for i in range(len(column_names))}
             result_list.append(song_dict)
         cursor.close()
-    
+
     output = "Currently queued songs:\n"
-    if not result_list: #empty
-        output+="There are no songs currently queued"
+    if not result_list:  # empty
+        output += "There are no songs currently queued"
     for song in result_list:
-        member = await interaction.guild.fetch_member(int(song['discord_user_id']))
-        output+=f"{song['position']:0>2} : {member.nick if member.nick is not None else member.name} : "
+        member = await interaction.guild.fetch_member(int(song["discord_user_id"]))
+        output += f"{song['position']:0>2} : {member.nick if member.nick is not None else member.name} : "
         if song["collaborators"]:
-            output+=f"{song['collaborators']} : "
-        output+=f"{song['title']}\n"
+            output += f"{song['collaborators']} : "
+        output += f"{song['title']}\n"
     await interaction.response.send_message(output, silent=True)
+
 
 # command to mark a song as revoked
 @tree.command(name="removesong", description="Removes song at specified index")
 async def removesong(interaction: discord.Interaction, position: int):
     """Removes song at specified index"""
-    global current_queue
     if current_queue == "":
         await interaction.response.send_message("No queues are currently active.")
         return
@@ -351,7 +493,9 @@ async def removesong(interaction: discord.Interaction, position: int):
             userofsong = cursor.fetchone()[0]
             cursor.close()
         if not interaction.user.id == userofsong:
-            await interaction.response.send_message('You only have permission to remove your own songs')
+            await interaction.response.send_message(
+                "You only have permission to remove your own songs"
+            )
             return
 
     with conn:
@@ -359,7 +503,7 @@ async def removesong(interaction: discord.Interaction, position: int):
         updatequery = "UPDATE songs SET is_revoked = TRUE WHERE position = ?;"
         cursor.execute(updatequery, (position,))
         cursor.close()
-    await interaction.response.send_message(f'Removed song at {position}')
-    
+    await interaction.response.send_message(f"Removed song at {position}")
+
 
 client.run(config["token"])
