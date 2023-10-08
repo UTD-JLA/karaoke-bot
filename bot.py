@@ -464,12 +464,33 @@ async def listsongs(interaction: discord.Interaction, include_old: Optional[bool
             result_list.append(song_dict)
         cursor.close()
 
+    discord_user_ids = set(int(song["discord_user_id"]) for song in result_list)
+    missing_members = []
+    nicknames = {}
+
+    # get members from cache if possible or add to missing_members
+    for user_id in discord_user_ids:
+        member = interaction.guild.get_member(user_id)
+        if member is not None:
+            nicknames[user_id] = member.nick if member.nick is not None else member.name
+        else:
+            missing_members.append(user_id)
+
+    # query missing members
+    if len(missing_members) > 0:
+        for member in await interaction.guild.query_members(user_ids=missing_members):
+            nicknames[member.id] = (
+                member.nick if member.nick is not None else member.name
+            )
+
     output = "Currently queued songs:\n"
     if not result_list:  # empty
         output += "There are no songs currently queued"
     for song in result_list:
-        member = await interaction.guild.fetch_member(int(song["discord_user_id"]))
-        output += f"{song['position']:0>2} : {member.nick if member.nick is not None else member.name} : "
+        user_id = int(song["discord_user_id"])
+        # if the user is not in the guild, use their id instead
+        nickname = nicknames[user_id] if user_id in nicknames else "<@{0}>".format(user_id)
+        output += f"{song['position']:0>2} : {nickname} : "
         if song["collaborators"]:
             output += f"{song['collaborators']} : "
         output += f"{song['title']}\n"
