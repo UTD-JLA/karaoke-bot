@@ -220,6 +220,64 @@ async def playback_loop():
             cursor.close()
         increment_cur_pos(current_queue)
 
+class EmbedPages():
+    def __init__(self, fields: list[tuple[str, str]], max_page_chars: int, max_fields: int = 15):
+        self.embed_pages = []
+        curr_chars = 0
+        curr_embed = discord.Embed(title="Currently queued songs")
+
+        for [name, value] in fields:
+            # start a new page if we are over the character limit or field limit
+            if curr_chars + len(name) + len(value) > max_page_chars or len(curr_embed.fields) >= max_fields:
+                self.embed_pages.append(curr_embed)
+                curr_embed = discord.Embed(title="Currently queued songs")
+                curr_chars = 0
+            curr_embed.add_field(name=name, value=value, inline=False)
+            curr_chars += len(name) + len(value)
+
+        if curr_chars > 0:
+            self.embed_pages.append(curr_embed)
+
+        self.current_page = 0
+        self.num_pages = len(self.embed_pages)
+
+        for i in range(self.num_pages):
+            self.embed_pages[i].set_footer(text=f"Page {i+1}/{self.num_pages}")
+
+    def get_current_page(self) -> discord.Embed:
+        return self.embed_pages[self.current_page]
+    
+    def next_page(self) -> discord.Embed:
+        self.current_page = (self.current_page + 1) % self.num_pages
+
+    def previous_page(self) -> discord.Embed:
+        self.current_page = (self.current_page - 1) % self.num_pages
+
+
+class PaginatedOutput(discord.ui.View):
+    def __init__(
+            self,
+            pages: EmbedPages,
+            user: discord.User,
+            timeout: Optional[float] = None
+        ):
+        self.pages = pages
+        self.user = user
+        super().__init__(timeout=timeout)
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        return interaction.user.id == self.user.id
+    
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.pages.previous_page()
+        await interaction.response.edit_message(embed=self.pages.get_current_page())
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.pages.next_page()
+        await interaction.response.edit_message(embed=self.pages.get_current_page())
+
 
 # command to initialize a queue
 @tree.command(
@@ -483,18 +541,21 @@ async def listsongs(interaction: discord.Interaction, include_old: Optional[bool
                 member.nick if member.nick is not None else member.name
             )
 
-    output = "Currently queued songs:\n"
-    if not result_list:  # empty
-        output += "There are no songs currently queued"
+    if not result_list:
+        await interaction.response.send_message("There are no songs currently queued")
+        return
+    
+    fields = []
     for song in result_list:
         user_id = int(song["discord_user_id"])
         # if the user is not in the guild, use their id instead
         nickname = nicknames[user_id] if user_id in nicknames else "<@{0}>".format(user_id)
-        output += f"{song['position']:0>2} : {nickname} : "
-        if song["collaborators"]:
-            output += f"{song['collaborators']} : "
-        output += f"{song['title']}\n"
-    await interaction.response.send_message(output, silent=True)
+        field_title = f"{song['position']:0>2}. {nickname}"
+        field_value = f"{song['title']} with {song['collaborators']}" if song["collaborators"] else song['title']
+        fields.append((field_title, field_value))
+
+    pages = EmbedPages(fields, 500)
+    await interaction.response.send_message(embed=pages.get_current_page(), view=PaginatedOutput(pages, interaction.user))
 
 
 # command to mark a song as revoked
